@@ -1,9 +1,6 @@
 {
   "name": "catatan-penjualan-bot",
   "version": "1.0.0",
-  "dependencies": {
-    "firebase-admin": "^12.2.0"
-  },
   "engines": {
     "node": "20.x"
   }
