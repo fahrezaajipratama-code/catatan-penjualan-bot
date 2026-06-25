@@ -1,9 +1,6 @@
 {
   "name": "catatan-penjualan-bot",
   "version": "1.0.0",
-  "scripts": {
-    "start": "node api/webhook.js"
-  },
   "dependencies": {
     "firebase-admin": "^12.2.0"
   },
