@@ -1,14 +1,11 @@
 {
   "name": "catatan-penjualan-bot",
   "version": "1.0.0",
-  "description": "Telegram bot untuk Catatan Penjualan",
-  "main": "index.js",
   "scripts": {
-    "dev": "vercel dev"
+    "start": "node api/webhook.js"
   },
   "dependencies": {
-    "firebase-admin": "^12.2.0",
-    "node-fetch": "^2.7.0"
+    "firebase-admin": "^12.2.0"
   },
   "engines": {
     "node": "20.x"
