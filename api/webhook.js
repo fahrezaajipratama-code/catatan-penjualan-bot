@@ -13,29 +13,42 @@ const SA         = (() => { try { return JSON.parse(process.env.FIREBASE_SERVICE
 function httpRequest(url, method, body, headers) {
   return new Promise((resolve, reject) => {
     const u = new URL(url);
+    const bodyStr = body
+      ? (typeof body === "string" ? body : JSON.stringify(body))
+      : null;
     const opts = {
       hostname: u.hostname,
       path: u.pathname + u.search,
       method: method || "GET",
-      headers: { "Content-Type": "application/json", ...(headers || {}) }
+      headers: {
+        "Content-Type": "application/json",
+        ...(bodyStr ? { "Content-Length": Buffer.byteLength(bodyStr) } : {}),
+        ...(headers || {})
+      }
     };
     const req = https.request(opts, res => {
       let data = "";
       res.on("data", c => data += c);
-      res.on("end", () => { try { resolve(JSON.parse(data)); } catch { resolve(data); } });
+      res.on("end", () => {
+        try { resolve(JSON.parse(data)); } catch { resolve(data); }
+      });
     });
     req.on("error", reject);
-    if (body) req.write(JSON.stringify(body));
+    if (bodyStr) req.write(bodyStr);
     req.end();
   });
 }
 
 async function tgSend(chatId, text) {
-  await httpRequest(
+  const payload = { chat_id: chatId, text, parse_mode: "HTML" };
+  console.log("[tgSend] to:", chatId, "text length:", text.length);
+  const res = await httpRequest(
     `https://api.telegram.org/bot${TG_TOKEN}/sendMessage`,
     "POST",
-    { chat_id: chatId, text, parse_mode: "HTML" }
+    payload
   );
+  if (!res.ok) console.error("[tgSend] error:", JSON.stringify(res));
+  return res;
 }
 
 // ── JWT / Google OAuth2 untuk Firestore REST ──────────────────
@@ -163,7 +176,11 @@ async function handleMessage(msg) {
   const text   = (msg.text || "").trim();
   const tgUser = msg.from?.username || "";
 
+  console.log("[handleMessage] chatId:", chatId, "user:", tgUser, "text:", text);
+  console.log("[handleMessage] TG_TOKEN set:", !!TG_TOKEN, "PROJECT_ID:", PROJECT_ID, "SA.email:", SA.client_email||"NOT SET");
+
   if (!TG_TOKEN || !PROJECT_ID || !SA.private_key) {
+    console.error("[handleMessage] Missing config! TOKEN:", !!TG_TOKEN, "PROJECT:", !!PROJECT_ID, "SA:", !!SA.private_key);
     await tgSend(chatId, "⚠️ Konfigurasi bot belum lengkap. Hubungi admin.");
     return;
   }
@@ -370,7 +387,17 @@ async function sendStokKritis(chatId) {
 // ── Vercel export ─────────────────────────────────────────────
 module.exports = async (req, res) => {
   if (req.method !== "POST") { return res.status(200).send("Bot aktif ✅"); }
-  try { const {message}=req.body; if (message) await handleMessage(message); }
-  catch(e) { console.error("Bot error:", e.message); }
+  console.log("[webhook] method:", req.method, "body keys:", Object.keys(req.body||{}));
+  try {
+    const { message } = req.body || {};
+    if (message) {
+      console.log("[webhook] from:", message.from?.username, "text:", message.text);
+      await handleMessage(message);
+    } else {
+      console.log("[webhook] no message in body:", JSON.stringify(req.body).slice(0,200));
+    }
+  } catch(e) {
+    console.error("[webhook] error:", e.message, e.stack?.slice(0,300));
+  }
   res.status(200).json({ok:true});
 };
