@@ -2,7 +2,7 @@
 // Telegram bot untuk Catatan Penjualan
 // Deploy ke Vercel — satu file, tanpa server
 
-const fetch = require("node-fetch");
+
 const admin = require("firebase-admin");
 
 // ── Firebase init (singleton) ─────────────────────────────────
