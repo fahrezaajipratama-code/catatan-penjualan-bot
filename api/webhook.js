@@ -193,27 +193,53 @@ async function handleMessage(msg) {
 
   const cmd = text.toLowerCase();
 
+  const bisaLaporan = user.perms?.laporan || user.isAdmin;
+  const bisaJual    = user.perms?.jual || user.isAdmin;
+
   if (cmd === "/start" || cmd === "/help") {
-    await tgSend(chatId,
-      `👋 Halo <b>${user.nama||user.username}</b>!\n\n` +
-      `<b>Format input transaksi:</b>\n` +
-      `<code>tanggal: DD/MM\ncabang: Nama Cabang\nNama Produk: qty\nNama Produk: qty</code>\n\n` +
-      `<b>Perintah laporan:</b>\n` +
-      `/laporan_hari — hari ini\n` +
-      `/laporan_bulan — bulan ini\n` +
-      `/laporan_cabang — per cabang\n` +
-      `/cek — stok bahan kritis\n` +
-      `/batal — batalkan input`
-    );
+    let msg = `👋 Halo <b>${user.nama||user.username}</b>!\n\n`;
+    if (bisaJual) {
+      msg += `<b>Format input transaksi:</b>\n`;
+      msg += `<code>tanggal: DD/MM\ncabang: Nama Cabang\nNama Produk: qty\nNama Produk: qty</code>\n\n`;
+      msg += `/batal — batalkan input\n`;
+    }
+    if (bisaLaporan) {
+      msg += `\n<b>Laporan:</b>\n`;
+      msg += `/laporan_hari — hari ini\n`;
+      msg += `/laporan_bulan — bulan ini\n`;
+      msg += `/laporan_cabang — per cabang\n`;
+      msg += `/cek — stok bahan kritis`;
+    }
+    await tgSend(chatId, msg);
     return;
   }
-  if (cmd === "/batal")          { await tgSend(chatId, "✅ Dibatalkan."); return; }
-  if (cmd === "/laporan_hari")   { await sendLaporan(chatId, "hari", user); return; }
-  if (cmd === "/laporan_bulan")  { await sendLaporan(chatId, "bulan", user); return; }
-  if (cmd === "/laporan_cabang") { await sendLaporanCabang(chatId, user); return; }
-  if (cmd === "/cek")            { await sendStokKritis(chatId); return; }
+  if (cmd === "/batal") { await tgSend(chatId, "✅ Dibatalkan."); return; }
+
+  // Laporan — hanya untuk user dengan akses laporan
+  if (cmd === "/laporan_hari" || cmd === "/laporan_bulan" || cmd === "/laporan_cabang" || cmd === "/cek") {
+    if (!bisaLaporan) {
+      await tgSend(chatId, "⛔ Anda tidak memiliki akses untuk melihat laporan.\n\nHubungi admin jika diperlukan.");
+      return;
+    }
+    if (cmd === "/laporan_hari")   { await sendLaporan(chatId, "hari", user); return; }
+    if (cmd === "/laporan_bulan")  { await sendLaporan(chatId, "bulan", user); return; }
+    if (cmd === "/laporan_cabang") { await sendLaporanCabang(chatId, user); return; }
+    if (cmd === "/cek")            { await sendStokKritis(chatId); return; }
+  }
+
+  // Catat transaksi — hanya untuk user dengan akses jual
+  if (cmd.includes("tanggal") || cmd.includes("cabang") || /\d+\/\d+/.test(cmd)) {
+    if (!bisaJual) {
+      await tgSend(chatId, "⛔ Anda tidak memiliki akses untuk mencatat transaksi.");
+      return;
+    }
+  }
 
   if (cmd.includes("tanggal") || cmd.includes("cabang") || /\d+\/\d+/.test(cmd)) {
+    if (!bisaJual) {
+      await tgSend(chatId, "⛔ Anda tidak memiliki akses untuk mencatat transaksi.");
+      return;
+    }
     await parseTrx(chatId, text, user);
     return;
   }
