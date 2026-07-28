@@ -195,16 +195,23 @@ async function handleMessage(msg) {
 
   const bisaLaporan = user.perms?.laporan || user.isAdmin;
   const bisaJual    = user.perms?.jual || user.isAdmin;
+  const bisaBeban   = user.perms?.beban || user.isAdmin;
 
   if (cmd === "/start" || cmd === "/help") {
     let msg = `👋 Halo <b>${user.nama||user.username}</b>!\n\n`;
     if (bisaJual) {
-      msg += `<b>Format input transaksi:</b>\n`;
-      msg += `<code>tanggal: DD/MM\ncabang: Nama Cabang\nNama Produk: qty\nNama Produk: qty</code>\n\n`;
+      msg += `<b>Input transaksi:</b>\n`;
+      msg += `<code>tanggal: DD/MM\ncabang: Nama Cabang\nNama Produk: qty</code>\n\n`;
       msg += `/batal — batalkan input\n`;
     }
+    if (bisaBeban) {
+      msg += `\n<b>Input beban penjualan:</b>\n`;
+      msg += `<code>beban\ntanggal: DD/MM\ncabang: Nama Cabang\nkasir: nominal\nNama Item, jumlah, harga</code>\n`;
+      msg += `/beban_hari — ringkasan beban hari ini\n`;
+      msg += `/beban_bulan — ringkasan beban bulan ini\n`;
+    }
     if (bisaLaporan) {
-      msg += `\n<b>Laporan:</b>\n`;
+      msg += `\n<b>Laporan penjualan:</b>\n`;
       msg += `/laporan_hari — hari ini\n`;
       msg += `/laporan_bulan — bulan ini\n`;
       msg += `/laporan_cabang — per cabang\n`;
@@ -214,6 +221,18 @@ async function handleMessage(msg) {
     return;
   }
   if (cmd === "/batal") { await tgSend(chatId, "✅ Dibatalkan."); return; }
+
+  // Beban penjualan
+  if (cmd === "/beban_hari" || cmd === "/beban_bulan") {
+    if (!bisaBeban) { await tgSend(chatId, "⛔ Anda tidak memiliki akses beban penjualan."); return; }
+    if (cmd === "/beban_hari")  { await sendLaporanBeban(chatId, "hari", user); return; }
+    if (cmd === "/beban_bulan") { await sendLaporanBeban(chatId, "bulan", user); return; }
+  }
+  if (text.toLowerCase().startsWith("beban") || (cmd.includes("tanggal") && cmd.includes("kasir"))) {
+    if (!bisaBeban) { await tgSend(chatId, "⛔ Anda tidak memiliki akses beban penjualan."); return; }
+    await parseBebanInput(chatId, text, user);
+    return;
+  }
 
   // Laporan — hanya untuk user dengan akses laporan
   if (cmd === "/laporan_hari" || cmd === "/laporan_bulan" || cmd === "/laporan_cabang" || cmd === "/cek") {
@@ -408,6 +427,78 @@ async function sendStokKritis(chatId) {
   if (!kritis.length) { await tgSend(chatId,"✅ Semua stok bahan baku aman."); return; }
   const rows=kritis.map(b=>`• ${b.nama}: <b>${b.stok} ${b.satuan}</b> (min:${b.min})${b.stok<=0?" 🚨 HABIS":" ⚠️"}`).join("\n");
   await tgSend(chatId,`⚠️ <b>Bahan kritis:</b>\n\n${rows}`);
+}
+
+
+// ── Beban Penjualan ───────────────────────────────────────────
+async function parseBebanInput(chatId, text, user) {
+  const lines = text.split("\n").map(l=>l.trim()).filter(Boolean);
+  let tgl=null, cabangQ=null, kasir=0;
+  const itemLines=[];
+  for (const line of lines) {
+    const low=line.toLowerCase();
+    if(low==='beban') continue;
+    if(low.startsWith("tanggal"))     tgl=parseDate(line.replace(/tanggal\s*[:：]?\s*/i,"").trim());
+    else if(low.startsWith("cabang")) cabangQ=line.replace(/cabang\s*[:：]?\s*/i,"").trim();
+    else if(low.startsWith("kasir"))  kasir=parseInt(line.replace(/kasir\s*[:：]?\s*/i,"").replace(/[^0-9]/g,""))||0;
+    else if(line.includes(","))       itemLines.push(line);
+  }
+  if(!tgl)     { await tgSend(chatId,"⚠️ Format tanggal salah. Contoh: <code>tanggal: 18/06</code>"); return; }
+  if(!cabangQ) { await tgSend(chatId,"⚠️ Cabang tidak ditemukan. Sertakan: <code>cabang: Nama Cabang</code>"); return; }
+  if(!itemLines.length) { await tgSend(chatId,"⚠️ Tidak ada item beban.\nFormat per baris: <code>Nama Item, jumlah, harga</code>\nContoh: <code>Gula, 5, 19000</code>"); return; }
+  const cabangs=await fsGet("cabangs");
+  const cabang=cabangs.find(c=>c.nama.toLowerCase().includes(cabangQ.toLowerCase()));
+  if(!cabang){ await tgSend(chatId,`⚠️ Cabang tidak ditemukan.\n\nTersedia:\n${cabangs.map(c=>"• "+c.nama).join("\n")}`); return; }
+  if(user.cabangId && user.cabangId!==cabang.id){
+    const allowed=cabangs.find(c=>c.id===user.cabangId);
+    await tgSend(chatId,"⛔ Anda hanya bisa input untuk cabang <b>"+(allowed?.nama||"-")+"</b>."); return;
+  }
+  const items=[];
+  for(const line of itemLines){
+    const parts=line.split(",").map(p=>p.trim());
+    if(parts.length<3) continue;
+    const nama=parts[0], jumlah=parseFloat(parts[1])||0, harga=parseInt(parts[2].replace(/[^0-9]/g,""))||0;
+    if(nama&&jumlah&&harga) items.push({nama,jumlah,harga,total:jumlah*harga});
+  }
+  if(!items.length){ await tgSend(chatId,"⚠️ Tidak ada item valid. Format: <code>Nama, jumlah, harga</code>"); return; }
+  const totalBeban=items.reduce((s,r)=>s+r.total,0);
+  const transaksis=await fsGet("transaksis");
+  const totalPenjualan=transaksis.filter(t=>t.tgl===tgl&&String(t.cabangId)===String(cabang.id)).reduce((s,t)=>s+t.total,0);
+  const bebans=await fsGet("bebans");
+  const existing=bebans.find(b=>b.tgl===tgl&&String(b.cabangId)===String(cabang.id));
+  const id=existing?existing.id:uid();
+  await fsSet("bebans",id,{id,tgl,cabangId:cabang.id,cabangNama:cabang.nama,
+    catatan:"via Telegram @"+(user.telegramUsername||user.username),
+    kasir,totalBeban,totalPenjualan,sisaKasir:kasir-totalBeban,labaKotor:totalPenjualan-totalBeban,
+    items,updatedBy:user.username});
+  const fmtTgl=new Date(tgl).toLocaleDateString("id-ID",{day:"2-digit",month:"long",year:"numeric"});
+  const showLaba=user.perms?.lihat_laba;
+  let reply=`${existing?"✏️ <b>Beban diperbarui</b>":"✅ <b>Beban dicatat</b>"}\n\n📅 <b>${fmtTgl}</b>  🏪 <b>${cabang.nama}</b>\n──────────────────\n`;
+  items.forEach(r=>reply+=`• ${r.nama}: ${r.jumlah} × ${fmt(r.harga)} = <b>${fmt(r.total)}</b>\n`);
+  reply+=`──────────────────\n📦 Total Beban: <b>${fmt(totalBeban)}</b>\n💵 Sisa Kasir: <b>${fmt(kasir-totalBeban)}</b>`;
+  if(showLaba) reply+=`\n📈 Laba Kotor: <b>${fmt(totalPenjualan-totalBeban)}</b>`;
+  await tgSend(chatId,reply);
+}
+
+async function sendLaporanBeban(chatId, periode, user) {
+  const bebans=await fsGet("bebans");
+  const td=today(), bln=td.slice(0,7);
+  let data=bebans, label="";
+  if(periode==="hari"){data=data.filter(b=>b.tgl===td);label=new Date(td).toLocaleDateString("id-ID",{day:"2-digit",month:"long",year:"numeric"});}
+  else{data=data.filter(b=>b.tgl&&b.tgl.startsWith(bln));const[y,m]=bln.split("-");label=["Jan","Feb","Mar","Apr","Mei","Jun","Jul","Agu","Sep","Okt","Nov","Des"][+m-1]+" "+y;}
+  if(user.cabangId) data=data.filter(b=>String(b.cabangId)===String(user.cabangId));
+  if(!data.length){await tgSend(chatId,"📊 Belum ada catatan beban untuk "+label+".");return;}
+  const showLaba=user.perms?.lihat_laba;
+  let msg="📊 <b>Beban Penjualan — "+label+"</b>";
+  for(const b of data){
+    msg+="\n──────────────────\n🏪 <b>"+(b.cabangNama||"-")+"</b>  📅 "+b.tgl+"\n";
+    (b.items||[]).forEach(r=>{msg+="  • "+r.nama+": "+r.jumlah+" × "+fmt(r.harga)+" = "+fmt(r.total)+"\n";});
+    msg+="  📦 Total Beban: <b>"+fmt(b.totalBeban||0)+"</b>\n";
+    msg+="  💵 Sisa Kasir: <b>"+fmt(b.sisaKasir||0)+"</b>";
+    if(showLaba) msg+="\n  📈 Laba Kotor: <b>"+fmt(b.labaKotor||0)+"</b>";
+    msg+="\n";
+  }
+  await tgSend(chatId,msg);
 }
 
 // ── Vercel export ─────────────────────────────────────────────
