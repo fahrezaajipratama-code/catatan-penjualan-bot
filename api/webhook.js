@@ -206,7 +206,8 @@ async function handleMessage(msg) {
     }
     if (bisaBeban) {
       msg += `\n<b>Input beban penjualan:</b>\n`;
-      msg += `<code>beban\ntanggal: DD/MM\ncabang: Nama Cabang\nkasir: nominal\nNama Item, jumlah, harga</code>\n`;
+      msg += `<code>beban\ntanggal: DD/MM\ncabang: Nama Cabang\nkasir: nominal\nNama Item, jumlah\nNama Item Baru, jumlah, harga, satuan</code>\n`;
+      msg += `Item yang namanya cocok dengan <b>Item Template</b> otomatis pakai harga & satuan template (cukup isi jumlah). Item wajib (mis. rumus 300×Cup) otomatis ikut terhitung. Jumlah boleh pakai koma, mis. <code>1,5</code>.\n`;
       msg += `/beban_hari — ringkasan beban hari ini\n`;
       msg += `/beban_bulan — ringkasan beban bulan ini\n`;
     }
@@ -313,20 +314,8 @@ async function parseTrx(chatId, text, user) {
     return;
   }
 
-  // Cek stok bahan
-  const butuh = {};
-  for (const {produk,qty} of items)
-    for (const r of produk.resep||[]) {
-      if (!butuh[r.bahanId]) butuh[r.bahanId]=0;
-      butuh[r.bahanId] += r.qty*qty;
-    }
-  for (const [bid,jml] of Object.entries(butuh)) {
-    const b = bahans.find(x=>String(x.id)===String(bid));
-    if (b && b.stok < jml) {
-      await tgSend(chatId, `🚫 Stok <b>${b.nama}</b> tidak cukup!\nButuh: ${jml} ${b.satuan}, Stok: ${b.stok} ${b.satuan}`);
-      return;
-    }
-  }
+  // Catatan: stok bahan baku TIDAK lagi dipengaruhi oleh transaksi — bahan baku
+  // hanya dipakai untuk resep produk & menghitung HPP (samakan dengan aplikasi web).
 
   const existing = transaksis.find(t=>t.tgl===tgl && String(t.cabangId)===String(cabang.id));
   let totalOmzet=0, totalLaba=0;
@@ -344,11 +333,7 @@ async function parseTrx(chatId, text, user) {
     cabangNama:cabang.nama, catatan:`via Telegram @${user.telegramUsername||user.username}`,
     items:snap, total:totalOmzet, laba:totalLaba });
 
-  // Update stok
-  for (const [bid,jml] of Object.entries(butuh)) {
-    const b = bahans.find(x=>String(x.id)===String(bid));
-    if (b) await fsSet("bahans", b.id, {...b, stok:Math.max(0,b.stok-jml)});
-  }
+  // Update stok produk jadi (stok bahan baku tidak diubah)
   for (const {produk,qty} of items) {
     const p = produks.find(x=>x.id===produk.id);
     if (p) await fsSet("produks", p.id, {...p, stok:Math.max(0,p.stok-qty)});
@@ -445,23 +430,59 @@ async function parseBebanInput(chatId, text, user) {
   }
   if(!tgl)     { await tgSend(chatId,"⚠️ Format tanggal salah. Contoh: <code>tanggal: 18/06</code>"); return; }
   if(!cabangQ) { await tgSend(chatId,"⚠️ Cabang tidak ditemukan. Sertakan: <code>cabang: Nama Cabang</code>"); return; }
-  if(!itemLines.length) { await tgSend(chatId,"⚠️ Tidak ada item beban.\nFormat per baris: <code>Nama Item, jumlah, harga</code>\nContoh: <code>Gula, 5, 19000</code>"); return; }
-  const cabangs=await fsGet("cabangs");
+  if(!itemLines.length) {
+    await tgSend(chatId,"⚠️ Tidak ada item beban.\nUntuk item template, cukup: <code>Nama Item, jumlah</code> (harga & satuan ikut template)\nUntuk item baru: <code>Nama Item, jumlah, harga[, satuan]</code>\nContoh:\n<code>Cup, 120</code>\n<code>Gula, 5, 19000, kg</code>");
+    return;
+  }
+  const [cabangs, bebanTemplate, bebanWajib] = await Promise.all([
+    fsGet("cabangs"), fsGet("bebanTemplate"), fsGet("bebanWajib")
+  ]);
   const cabang=cabangs.find(c=>c.nama.toLowerCase().includes(cabangQ.toLowerCase()));
   if(!cabang){ await tgSend(chatId,`⚠️ Cabang tidak ditemukan.\n\nTersedia:\n${cabangs.map(c=>"• "+c.nama).join("\n")}`); return; }
   if(user.cabangId && user.cabangId!==cabang.id){
     const allowed=cabangs.find(c=>c.id===user.cabangId);
     await tgSend(chatId,"⛔ Anda hanya bisa input untuk cabang <b>"+(allowed?.nama||"-")+"</b>."); return;
   }
-  const items=[];
+
+  // Pisahkan input menjadi Item Template (harga & satuan otomatis dari template) dan Item Tambahan (manual)
+  const tplItems=[], addItems=[];
+  const tplQtyByName={}; // nama template (lowercase) -> jumlah, dipakai untuk hitung Item Wajib
   for(const line of itemLines){
     const parts=line.split(",").map(p=>p.trim());
-    if(parts.length<3) continue;
-    const nama=parts[0], jumlah=parseFloat(parts[1])||0, harga=parseInt(parts[2].replace(/[^0-9]/g,""))||0;
-    if(nama&&jumlah&&harga) items.push({nama,jumlah,harga,total:jumlah*harga});
+    if(parts.length<2) continue;
+    const namaRaw=parts[0];
+    const jumlah=parseFloat((parts[1]||"").replace(",","."))||0;
+    if(!namaRaw||!jumlah) continue;
+    const tpl=findLike(bebanTemplate,"nama",namaRaw);
+    if(tpl && parts.length===2){
+      tplItems.push({nama:tpl.nama,jumlah,harga:tpl.harga,satuan:tpl.satuan||"",total:jumlah*tpl.harga});
+      tplQtyByName[tpl.nama.toLowerCase()]=jumlah;
+      continue;
+    }
+    const harga=parseInt((parts[2]||"").replace(/[^0-9]/g,""))||0;
+    const satuan=parts[3]||"";
+    if(!harga) continue; // item baru wajib sertakan harga
+    addItems.push({nama:namaRaw,jumlah,harga,satuan,total:jumlah*harga});
+    if(tpl) tplQtyByName[tpl.nama.toLowerCase()]=jumlah;
   }
-  if(!items.length){ await tgSend(chatId,"⚠️ Tidak ada item valid. Format: <code>Nama, jumlah, harga</code>"); return; }
-  const totalBeban=items.reduce((s,r)=>s+r.total,0);
+  if(!tplItems.length && !addItems.length){
+    await tgSend(chatId,"⚠️ Tidak ada item valid.\nItem template: <code>Nama, jumlah</code>\nItem baru: <code>Nama, jumlah, harga[, satuan]</code>");
+    return;
+  }
+
+  // Item Wajib — otomatis dihitung (mis. "Lain-lain" = pengali × jumlah "Cup")
+  const wajibItems=[];
+  for(const w of bebanWajib){
+    const qty=tplQtyByName[(w.linkTpl||"").toLowerCase()]||0;
+    const h=(w.pengali||0)*qty;
+    if(h>0){
+      const satuan=(bebanTemplate.find(t=>t.nama===w.linkTpl)||{}).satuan||"";
+      wajibItems.push({nama:w.nama,jumlah:1,harga:h,satuan,total:h,linkTpl:w.linkTpl,pengali:w.pengali});
+    }
+  }
+
+  const allItems=[...tplItems,...wajibItems,...addItems];
+  const totalBeban=allItems.reduce((s,r)=>s+r.total,0);
   const transaksis=await fsGet("transaksis");
   const totalPenjualan=transaksis.filter(t=>t.tgl===tgl&&String(t.cabangId)===String(cabang.id)).reduce((s,t)=>s+t.total,0);
   const bebans=await fsGet("bebans");
@@ -470,11 +491,11 @@ async function parseBebanInput(chatId, text, user) {
   await fsSet("bebans",id,{id,tgl,cabangId:cabang.id,cabangNama:cabang.nama,
     catatan:"via Telegram @"+(user.telegramUsername||user.username),
     kasir,totalBeban,totalPenjualan,sisaKasir:kasir-totalBeban,labaKotor:totalPenjualan-totalBeban,
-    items,updatedBy:user.username});
+    tplItems,wajibItems,addItems,items:allItems,updatedBy:user.username});
   const fmtTgl=new Date(tgl).toLocaleDateString("id-ID",{day:"2-digit",month:"long",year:"numeric"});
   const showLaba=user.perms?.lihat_laba;
   let reply=`${existing?"✏️ <b>Beban diperbarui</b>":"✅ <b>Beban dicatat</b>"}\n\n📅 <b>${fmtTgl}</b>  🏪 <b>${cabang.nama}</b>\n──────────────────\n`;
-  items.forEach(r=>reply+=`• ${r.nama}: ${r.jumlah} × ${fmt(r.harga)} = <b>${fmt(r.total)}</b>\n`);
+  allItems.forEach(r=>reply+=`• ${r.nama}: ${r.jumlah}${r.satuan?" "+r.satuan:""} × ${fmt(r.harga)} = <b>${fmt(r.total)}</b>\n`);
   reply+=`──────────────────\n📦 Total Beban: <b>${fmt(totalBeban)}</b>\n💵 Sisa Kasir: <b>${fmt(kasir-totalBeban)}</b>`;
   if(showLaba) reply+=`\n📈 Laba Kotor: <b>${fmt(totalPenjualan-totalBeban)}</b>`;
   await tgSend(chatId,reply);
@@ -492,7 +513,7 @@ async function sendLaporanBeban(chatId, periode, user) {
   let msg="📊 <b>Beban Penjualan — "+label+"</b>";
   for(const b of data){
     msg+="\n──────────────────\n🏪 <b>"+(b.cabangNama||"-")+"</b>  📅 "+b.tgl+"\n";
-    (b.items||[]).forEach(r=>{msg+="  • "+r.nama+": "+r.jumlah+" × "+fmt(r.harga)+" = "+fmt(r.total)+"\n";});
+    (b.items||[]).forEach(r=>{msg+="  • "+r.nama+": "+r.jumlah+(r.satuan?" "+r.satuan:"")+" × "+fmt(r.harga)+" = "+fmt(r.total)+"\n";});
     msg+="  📦 Total Beban: <b>"+fmt(b.totalBeban||0)+"</b>\n";
     msg+="  💵 Sisa Kasir: <b>"+fmt(b.sisaKasir||0)+"</b>";
     if(showLaba) msg+="\n  📈 Laba Kotor: <b>"+fmt(b.labaKotor||0)+"</b>";
